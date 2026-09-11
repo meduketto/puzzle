@@ -95,18 +95,6 @@ impl Board {
         grid
     }
 
-    fn canonicalize(&mut self) {
-        // Find the red piece first to keep it as the first element if possible,
-        // but the key is consistent identification of the OTHER pieces.
-        // We'll sort by type, then position.
-        self.pieces.sort_by(|a, b| {
-            if a.piece_type != b.piece_type {
-                return a.piece_type.cmp(&b.piece_type);
-            }
-            (a.y, a.x).cmp(&(b.y, b.x))
-        });
-    }
-
     fn is_goal(&self) -> bool {
         for p in &self.pieces {
             if p.piece_type == PieceType::Red2x2 {
@@ -149,13 +137,21 @@ impl Board {
                         let mut next_board = self.clone();
                         next_board.pieces[idx].x = nx as u8;
                         next_board.pieces[idx].y = ny as u8;
-                        next_board.canonicalize();
                         moves.push(next_board);
                     }
                 }
             }
         }
         moves
+    }
+
+    fn canonicalize(&mut self) {
+        self.pieces.sort_by(|a, b| {
+            if a.piece_type != b.piece_type {
+                return a.piece_type.cmp(&b.piece_type);
+            }
+            (a.y, a.x).cmp(&(b.y, b.x))
+        });
     }
 }
 
@@ -167,7 +163,6 @@ struct SolutionPath {
 
 #[derive(Component)]
 struct PieceEntity {
-    piece_type: PieceType,
     original_idx: usize,
 }
 
@@ -180,24 +175,27 @@ enum NavButton {
 const TILE_SIZE: f32 = 100.0;
 const MARGIN: f32 = 5.0;
 
-fn main() {
-    let mut start = Board::new();
-    start.canonicalize();
-
-    let mut path = Vec::new();
+fn solve() {
+    let start = Board::new();
     let mut queue = VecDeque::new();
     queue.push_back((start.clone(), vec![start.clone()]));
-    let mut visited = HashSet::new();
-    visited.insert(start);
 
+    let mut visited = HashSet::new();
+    let mut start_canon = start.clone();
+    start_canon.canonicalize();
+    visited.insert(start_canon);
+
+    let mut path = Vec::new();
     while let Some((current, p)) = queue.pop_front() {
         if current.is_goal() {
             path = p;
             break;
         }
         for next in current.get_moves() {
-            if !visited.contains(&next) {
-                visited.insert(next.clone());
+            let mut next_canon = next.clone();
+            next_canon.canonicalize();
+            if !visited.contains(&next_canon) {
+                visited.insert(next_canon);
                 let mut next_path = p.clone();
                 next_path.push(next.clone());
                 queue.push_back((next, next_path));
@@ -226,7 +224,6 @@ fn main() {
 fn setup(mut commands: Commands, solution: Res<SolutionPath>) {
     commands.spawn(Camera2dBundle::default());
 
-    // Spawn board background
     commands.spawn(SpriteBundle {
         sprite: Sprite {
             color: Color::srgb(0.2, 0.2, 0.2),
@@ -237,7 +234,6 @@ fn setup(mut commands: Commands, solution: Res<SolutionPath>) {
         ..default()
     });
 
-    // Initial pieces
     if let Some(board) = solution.steps.get(0) {
         for (idx, piece) in board.pieces.iter().enumerate() {
             let color = match piece.piece_type {
@@ -264,15 +260,11 @@ fn setup(mut commands: Commands, solution: Res<SolutionPath>) {
                     },
                     ..default()
                 },
-                PieceEntity {
-                    piece_type: piece.piece_type,
-                    original_idx: idx,
-                },
+                PieceEntity { original_idx: idx },
             ));
         }
     }
 
-    // UI Buttons
     commands
         .spawn(NodeBundle {
             style: Style {
@@ -376,55 +368,31 @@ fn button_system(
 
 fn update_pieces(
     solution: Res<SolutionPath>,
-    mut query: Query<(Entity, &PieceEntity, &mut Transform)>,
+    mut query: Query<(&PieceEntity, &mut Transform)>,
     time: Res<Time>,
 ) {
     if let Some(board) = solution.steps.get(solution.current_idx) {
-        let mut board_pieces_by_type: std::collections::HashMap<PieceType, Vec<&Piece>> =
-            std::collections::HashMap::new();
-        for piece in &board.pieces {
-            board_pieces_by_type
-                .entry(piece.piece_type)
-                .or_default()
-                .push(piece);
-        }
-        for pieces in board_pieces_by_type.values_mut() {
-            pieces.sort_by(|a, b| (a.y, a.x).cmp(&(b.y, b.x)));
-        }
+        for (piece_entity, mut transform) in &mut query {
+            if let Some(piece) = board.pieces.get(piece_entity.original_idx) {
+                let (w, h) = match piece.piece_type {
+                    PieceType::Red2x2 => (2.0, 2.0),
+                    PieceType::Yellow1x2 => (1.0, 2.0),
+                    PieceType::Yellow2x1 => (2.0, 1.0),
+                    PieceType::Blue1x1 => (1.0, 1.0),
+                };
 
-        let mut entity_data: Vec<(Entity, PieceType, usize)> = Vec::new();
-        for (entity, pe, _) in query.iter() {
-            entity_data.push((entity, pe.piece_type, pe.original_idx));
-        }
-        entity_data.sort_by_key(|(_, _, idx)| *idx);
+                let target_x = (piece.x as f32 - 2.0 + w / 2.0) * TILE_SIZE;
+                let target_y = (2.5 - piece.y as f32 - h / 2.0) * TILE_SIZE;
+                let target_pos = Vec3::new(target_x, target_y, 0.0);
 
-        let mut entities_by_type: std::collections::HashMap<PieceType, Vec<Entity>> =
-            std::collections::HashMap::new();
-        for (entity, ptype, _) in entity_data {
-            entities_by_type.entry(ptype).or_default().push(entity);
-        }
-
-        for (ptype, entities) in entities_by_type {
-            if let Some(pieces) = board_pieces_by_type.get(&ptype) {
-                for (i, entity) in entities.into_iter().enumerate() {
-                    if let Some(piece) = pieces.get(i) {
-                        if let Ok((_, _, mut transform)) = query.get_mut(entity) {
-                            let (w, h) = match piece.piece_type {
-                                PieceType::Red2x2 => (2.0, 2.0),
-                                PieceType::Yellow1x2 => (1.0, 2.0),
-                                PieceType::Yellow2x1 => (2.0, 1.0),
-                                PieceType::Blue1x1 => (1.0, 1.0),
-                            };
-                            let target_x = (piece.x as f32 - 2.0 + w / 2.0) * TILE_SIZE;
-                            let target_y = (2.5 - piece.y as f32 - h / 2.0) * TILE_SIZE;
-                            let target_pos = Vec3::new(target_x, target_y, 0.0);
-                            transform.translation = transform
-                                .translation
-                                .lerp(target_pos, time.delta_seconds() * 10.0);
-                        }
-                    }
-                }
+                transform.translation = transform
+                    .translation
+                    .lerp(target_pos, time.delta_seconds() * 15.0);
             }
         }
     }
+}
+
+fn main() {
+    solve();
 }
