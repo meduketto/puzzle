@@ -161,6 +161,7 @@ struct SolutionPath {
     current_idx: usize,
     is_playing: bool,
     current_board: Board,
+    dragging_piece: Option<usize>, // Index of the piece currently being dragged
 }
 
 #[derive(Component)]
@@ -220,6 +221,7 @@ fn solve() {
             current_idx: 0,
             is_playing: false,
             current_board: start,
+            dragging_piece: None,
         })
         .add_systems(Startup, setup)
         .add_systems(
@@ -381,65 +383,90 @@ fn mouse_interaction_system(
     camera_q: Query<(&Camera, &GlobalTransform)>,
     mut solution: ResMut<SolutionPath>,
 ) {
-    if !mouse_button_input.just_pressed(MouseButton::Left) {
-        return;
-    }
-
     let window = windows.single();
     let (camera, camera_transform) = camera_q.single();
 
-    if let Some(world_position) = window
+    let cursor_position = window
         .cursor_position()
-        .and_then(|cursor| camera.viewport_to_world_2d(camera_transform, cursor))
-    {
-        let grid_x = (world_position.x / TILE_SIZE + 2.0).floor();
-        let grid_y = (2.5 - world_position.y / TILE_SIZE).floor();
+        .and_then(|cursor| camera.viewport_to_world_2d(camera_transform, cursor));
 
-        if grid_x >= 0.0 && grid_x < 4.0 && grid_y >= 0.0 && grid_y < 5.0 {
-            let gx = grid_x as u8;
-            let gy = grid_y as u8;
+    if mouse_button_input.just_pressed(MouseButton::Left) {
+        if let Some(world_pos) = cursor_position {
+            let grid_x = (world_pos.x / TILE_SIZE + 2.0).floor();
+            let grid_y = (2.5 - world_pos.y / TILE_SIZE).floor();
 
-            let grid = solution.current_board.to_grid();
-            let occupant = grid[gy as usize][gx as usize];
+            if grid_x >= 0.0 && grid_x < 4.0 && grid_y >= 0.0 && grid_y < 5.0 {
+                let gx = grid_x as u8;
+                let gy = grid_y as u8;
+                let grid = solution.current_board.to_grid();
+                let occupant = grid[gy as usize][gx as usize];
+                if occupant != -1 {
+                    solution.dragging_piece = Some(occupant as usize);
+                }
+            }
+        }
+    }
 
-            if occupant != -1 {
-                let idx = occupant as usize;
-                let piece = solution.current_board.pieces[idx];
-                let (w, h) = match piece.piece_type {
-                    PieceType::Red2x2 => (2, 2),
-                    PieceType::Yellow1x2 => (1, 2),
-                    PieceType::Yellow2x1 => (2, 1),
-                    PieceType::Blue1x1 => (1, 1),
-                };
+    if mouse_button_input.just_released(MouseButton::Left) {
+        solution.dragging_piece = None;
+    }
 
-                for (dx, dy) in [(0, -1), (0, 1), (-1, 0), (1, 0)] {
-                    let nx = piece.x as i8 + dx;
-                    let ny = piece.y as i8 + dy;
+    if let (Some(dragged_idx), Some(world_pos)) = (solution.dragging_piece, cursor_position) {
+        let piece = solution.current_board.pieces[dragged_idx];
+        let (w, h) = match piece.piece_type {
+            PieceType::Red2x2 => (2, 2),
+            PieceType::Yellow1x2 => (1, 2),
+            PieceType::Yellow2x1 => (2, 1),
+            PieceType::Blue1x1 => (1, 1),
+        };
 
-                    if nx >= 0 && ny >= 0 && nx + w as i8 <= 4 && ny + h as i8 <= 5 {
-                        let mut possible = true;
-                        for ox in 0..w {
-                            for oy in 0..h {
-                                let tx = nx + ox as i8;
-                                let ty = ny + oy as i8;
-                                let occ = grid[ty as usize][tx as usize];
-                                if occ != -1 && occ != idx as i8 {
-                                    possible = false;
-                                    break;
-                                }
-                            }
-                            if !possible {
-                                break;
-                            }
-                        }
+        // Calculate where the mouse is relative to the piece's current top-left anchor
+        let anchor_x = (piece.x as f32 - 2.0) * TILE_SIZE;
+        let anchor_y = (2.5 - piece.y as f32) * TILE_SIZE;
 
-                        if possible {
-                            solution.current_board.pieces[idx].x = nx as u8;
-                            solution.current_board.pieces[idx].y = ny as u8;
-                            solution.is_playing = true;
+        let dx = world_pos.x - (anchor_x + (w as f32 * TILE_SIZE) / 2.0);
+        let dy = world_pos.y - (anchor_y - (h as f32 * TILE_SIZE) / 2.0);
+
+        // Define a threshold for "dragging" into a new cell (half a tile)
+        let threshold = TILE_SIZE * 0.5;
+
+        let mut move_dir = None;
+        if dx > threshold {
+            move_dir = Some((1, 0));
+        } else if dx < -threshold {
+            move_dir = Some((-1, 0));
+        } else if dy > threshold {
+            move_dir = Some((0, -1));
+        } else if dy < -threshold {
+            move_dir = Some((0, 1));
+        }
+
+        if let Some((mdx, mdy)) = move_dir {
+            let nx = piece.x as i8 + mdx;
+            let ny = piece.y as i8 + mdy;
+
+            if nx >= 0 && ny >= 0 && nx + w as i8 <= 4 && ny + h as i8 <= 5 {
+                let grid = solution.current_board.to_grid();
+                let mut possible = true;
+                for ox in 0..w {
+                    for oy in 0..h {
+                        let tx = nx + ox as i8;
+                        let ty = ny + oy as i8;
+                        let occ = grid[ty as usize][tx as usize];
+                        if occ != -1 && occ != dragged_idx as i8 {
+                            possible = false;
                             break;
                         }
                     }
+                    if !possible {
+                        break;
+                    }
+                }
+
+                if possible {
+                    solution.current_board.pieces[dragged_idx].x = nx as u8;
+                    solution.current_board.pieces[dragged_idx].y = ny as u8;
+                    solution.is_playing = true;
                 }
             }
         }
