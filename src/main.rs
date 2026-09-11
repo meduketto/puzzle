@@ -159,6 +159,8 @@ impl Board {
 struct SolutionPath {
     steps: Vec<Board>,
     current_idx: usize,
+    is_playing: bool,
+    current_board: Board,
 }
 
 #[derive(Component)]
@@ -166,10 +168,11 @@ struct PieceEntity {
     original_idx: usize,
 }
 
-#[derive(Component)]
+#[derive(Component, PartialEq, Eq, Clone, Copy)]
 enum NavButton {
     Back,
     Forward,
+    Reset,
 }
 
 const TILE_SIZE: f32 = 100.0;
@@ -213,11 +216,16 @@ fn solve() {
             ..default()
         }))
         .insert_resource(SolutionPath {
-            steps: path,
+            steps: path.clone(),
             current_idx: 0,
+            is_playing: false,
+            current_board: start,
         })
         .add_systems(Startup, setup)
-        .add_systems(Update, (button_system, update_pieces))
+        .add_systems(
+            Update,
+            (button_system, mouse_interaction_system, update_pieces),
+        )
         .run();
 }
 
@@ -278,57 +286,38 @@ fn setup(mut commands: Commands, solution: Res<SolutionPath>) {
             ..default()
         })
         .with_children(|parent| {
-            parent
-                .spawn((
-                    ButtonBundle {
-                        style: Style {
-                            width: Val::Px(100.0),
-                            height: Val::Px(50.0),
-                            justify_content: JustifyContent::Center,
-                            align_items: AlignItems::Center,
+            for btn_type in [NavButton::Back, NavButton::Forward, NavButton::Reset] {
+                let label = match btn_type {
+                    NavButton::Back => "Back",
+                    NavButton::Forward => "Forward",
+                    NavButton::Reset => "Reset",
+                };
+                parent
+                    .spawn((
+                        ButtonBundle {
+                            style: Style {
+                                width: Val::Px(100.0),
+                                height: Val::Px(50.0),
+                                justify_content: JustifyContent::Center,
+                                align_items: AlignItems::Center,
+                                ..default()
+                            },
+                            background_color: Color::srgb(0.15, 0.15, 0.15).into(),
                             ..default()
                         },
-                        background_color: Color::srgb(0.15, 0.15, 0.15).into(),
-                        ..default()
-                    },
-                    NavButton::Back,
-                ))
-                .with_children(|parent| {
-                    parent.spawn(TextBundle::from_section(
-                        "Back",
-                        TextStyle {
-                            font_size: 30.0,
-                            color: Color::WHITE,
-                            ..default()
-                        },
-                    ));
-                });
-
-            parent
-                .spawn((
-                    ButtonBundle {
-                        style: Style {
-                            width: Val::Px(100.0),
-                            height: Val::Px(50.0),
-                            justify_content: JustifyContent::Center,
-                            align_items: AlignItems::Center,
-                            ..default()
-                        },
-                        background_color: Color::srgb(0.15, 0.15, 0.15).into(),
-                        ..default()
-                    },
-                    NavButton::Forward,
-                ))
-                .with_children(|parent| {
-                    parent.spawn(TextBundle::from_section(
-                        "Forward",
-                        TextStyle {
-                            font_size: 30.0,
-                            color: Color::WHITE,
-                            ..default()
-                        },
-                    ));
-                });
+                        btn_type,
+                    ))
+                    .with_children(|parent| {
+                        parent.spawn(TextBundle::from_section(
+                            label,
+                            TextStyle {
+                                font_size: 30.0,
+                                color: Color::WHITE,
+                                ..default()
+                            },
+                        ));
+                    });
+            }
         });
 }
 
@@ -340,27 +329,118 @@ fn button_system(
     mut solution: ResMut<SolutionPath>,
 ) {
     for (interaction, nav, mut color) in &mut interaction_query {
+        let is_disabled =
+            solution.is_playing && (*nav == NavButton::Back || *nav == NavButton::Forward);
+
         match *interaction {
             Interaction::Pressed => {
-                *color = Color::srgb(0.35, 0.75, 0.35).into();
-                match nav {
-                    NavButton::Back => {
-                        if solution.current_idx > 0 {
-                            solution.current_idx -= 1;
+                if !is_disabled {
+                    *color = Color::srgb(0.35, 0.75, 0.35).into();
+                    match nav {
+                        NavButton::Back => {
+                            if solution.current_idx > 0 {
+                                solution.current_idx -= 1;
+                                solution.current_board =
+                                    solution.steps[solution.current_idx].clone();
+                            }
                         }
-                    }
-                    NavButton::Forward => {
-                        if solution.current_idx < solution.steps.len() - 1 {
-                            solution.current_idx += 1;
+                        NavButton::Forward => {
+                            if solution.current_idx < solution.steps.len() - 1 {
+                                solution.current_idx += 1;
+                                solution.current_board =
+                                    solution.steps[solution.current_idx].clone();
+                            }
+                        }
+                        NavButton::Reset => {
+                            solution.current_idx = 0;
+                            solution.is_playing = false;
+                            solution.current_board = solution.steps[0].clone();
                         }
                     }
                 }
             }
             Interaction::Hovered => {
-                *color = Color::srgb(0.25, 0.25, 0.25).into();
+                if !is_disabled {
+                    *color = Color::srgb(0.25, 0.25, 0.25).into();
+                }
             }
             Interaction::None => {
-                *color = Color::srgb(0.15, 0.15, 0.15).into();
+                if is_disabled {
+                    *color = Color::srgb(0.05, 0.05, 0.05).into();
+                } else {
+                    *color = Color::srgb(0.15, 0.15, 0.15).into();
+                }
+            }
+        }
+    }
+}
+
+fn mouse_interaction_system(
+    mouse_button_input: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    camera_q: Query<(&Camera, &GlobalTransform)>,
+    mut solution: ResMut<SolutionPath>,
+) {
+    if !mouse_button_input.just_pressed(MouseButton::Left) {
+        return;
+    }
+
+    let window = windows.single();
+    let (camera, camera_transform) = camera_q.single();
+
+    if let Some(world_position) = window
+        .cursor_position()
+        .and_then(|cursor| camera.viewport_to_world_2d(camera_transform, cursor))
+    {
+        let grid_x = (world_position.x / TILE_SIZE + 2.0).floor();
+        let grid_y = (2.5 - world_position.y / TILE_SIZE).floor();
+
+        if grid_x >= 0.0 && grid_x < 4.0 && grid_y >= 0.0 && grid_y < 5.0 {
+            let gx = grid_x as u8;
+            let gy = grid_y as u8;
+
+            let grid = solution.current_board.to_grid();
+            let occupant = grid[gy as usize][gx as usize];
+
+            if occupant != -1 {
+                let idx = occupant as usize;
+                let piece = solution.current_board.pieces[idx];
+                let (w, h) = match piece.piece_type {
+                    PieceType::Red2x2 => (2, 2),
+                    PieceType::Yellow1x2 => (1, 2),
+                    PieceType::Yellow2x1 => (2, 1),
+                    PieceType::Blue1x1 => (1, 1),
+                };
+
+                for (dx, dy) in [(0, -1), (0, 1), (-1, 0), (1, 0)] {
+                    let nx = piece.x as i8 + dx;
+                    let ny = piece.y as i8 + dy;
+
+                    if nx >= 0 && ny >= 0 && nx + w as i8 <= 4 && ny + h as i8 <= 5 {
+                        let mut possible = true;
+                        for ox in 0..w {
+                            for oy in 0..h {
+                                let tx = nx + ox as i8;
+                                let ty = ny + oy as i8;
+                                let occ = grid[ty as usize][tx as usize];
+                                if occ != -1 && occ != idx as i8 {
+                                    possible = false;
+                                    break;
+                                }
+                            }
+                            if !possible {
+                                break;
+                            }
+                        }
+
+                        if possible {
+                            solution.current_board.pieces[idx].x = nx as u8;
+                            solution.current_board.pieces[idx].y = ny as u8;
+                            solution.is_playing = true;
+                            break;
+                        }
+                    }
+                }
             }
         }
     }
@@ -371,24 +451,23 @@ fn update_pieces(
     mut query: Query<(&PieceEntity, &mut Transform)>,
     time: Res<Time>,
 ) {
-    if let Some(board) = solution.steps.get(solution.current_idx) {
-        for (piece_entity, mut transform) in &mut query {
-            if let Some(piece) = board.pieces.get(piece_entity.original_idx) {
-                let (w, h) = match piece.piece_type {
-                    PieceType::Red2x2 => (2.0, 2.0),
-                    PieceType::Yellow1x2 => (1.0, 2.0),
-                    PieceType::Yellow2x1 => (2.0, 1.0),
-                    PieceType::Blue1x1 => (1.0, 1.0),
-                };
+    let board = &solution.current_board;
+    for (piece_entity, mut transform) in &mut query {
+        if let Some(piece) = board.pieces.get(piece_entity.original_idx) {
+            let (w, h) = match piece.piece_type {
+                PieceType::Red2x2 => (2.0, 2.0),
+                PieceType::Yellow1x2 => (1.0, 2.0),
+                PieceType::Yellow2x1 => (2.0, 1.0),
+                PieceType::Blue1x1 => (1.0, 1.0),
+            };
 
-                let target_x = (piece.x as f32 - 2.0 + w / 2.0) * TILE_SIZE;
-                let target_y = (2.5 - piece.y as f32 - h / 2.0) * TILE_SIZE;
-                let target_pos = Vec3::new(target_x, target_y, 0.0);
+            let target_x = (piece.x as f32 - 2.0 + w / 2.0) * TILE_SIZE;
+            let target_y = (2.5 - piece.y as f32 - h / 2.0) * TILE_SIZE;
+            let target_pos = Vec3::new(target_x, target_y, 0.0);
 
-                transform.translation = transform
-                    .translation
-                    .lerp(target_pos, time.delta_seconds() * 15.0);
-            }
+            transform.translation = transform
+                .translation
+                .lerp(target_pos, time.delta_seconds() * 15.0);
         }
     }
 }
